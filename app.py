@@ -99,7 +99,7 @@ css = """
 
 with gr.Blocks(title="Subtitle Generator") as demo:
     with gr.Column(elem_classes="container"):
-        gr.Markdown("# Subtitle Generator\nGenerate `.srt` subtitle files from any video using OpenAI Whisper.")
+        gr.Markdown("# Subtitle Generator\nGenerate `.srt` subtitle files from any video using OpenAI Whisper.\n\nAdd **vocabulary hints** to get proper nouns and technical terms spelled correctly.")
         api_key = gr.Textbox(
             label="OpenAI API Key",
             placeholder="sk-...",

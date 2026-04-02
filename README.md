@@ -2,6 +2,8 @@
 
 Generate high-quality `.srt` subtitle files from any video using OpenAI's Whisper transcription API.
 
+**What makes this different:** Vocabulary hints let you feed names, brands, and technical terms to the transcription engine so it spells them correctly. Without this, AI transcription often mangles proper nouns — this tool fixes that.
+
 ---
 
 ## Requirements
@@ -64,8 +66,9 @@ The app will open automatically in your browser.
 
 1. Enter your OpenAI API key
 2. Upload your video file
-3. Click **Generate Subtitles**
-4. Download the `.srt` file when done
+3. Add **vocabulary hints** — names, brands, technical terms that you want transcribed correctly (e.g. `Hakui Koyori, Nendoroid, Vox Akuma`)
+4. Click **Generate Subtitles**
+5. Download the `.srt` file when done
 
 ---
 
