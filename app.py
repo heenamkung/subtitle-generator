@@ -74,13 +74,9 @@ def generate_subtitles(api_key: str, video_file: str, chunk_seconds: int, prompt
         sentence_segments = subtitle_agent.reformat_as_sentences(merged_segments)
         srt_text = subtitle_agent.to_srt(sentence_segments)
 
-        srt_path = work_dir / f"{input_video.stem}.srt"
-        files.save_text(srt_path, srt_text)
-
-        # Copy SRT to a stable temp file so we can clean up the work dir
-        import shutil as _shutil
-        stable_srt = Path(tempfile.mktemp(suffix=".srt"))
-        _shutil.copy2(srt_path, stable_srt)
+        stable_dir = Path(tempfile.mkdtemp())
+        stable_srt = stable_dir / "subtitle.srt"
+        files.save_text(stable_srt, srt_text)
         shutil.rmtree(work_dir, ignore_errors=True)
 
         yield "Done!", str(stable_srt)
@@ -95,6 +91,20 @@ def generate_subtitles(api_key: str, video_file: str, chunk_seconds: int, prompt
 
 css = """
 .container { max-width: 760px; margin: auto; }
+.download-btn { min-height: 60px; }
+.download-btn a { font-size: 1.1em; }
+@keyframes spin { to { transform: rotate(360deg); } }
+.spinner::before {
+    content: "";
+    display: inline-block;
+    width: 14px; height: 14px;
+    border: 2px solid #888;
+    border-top-color: transparent;
+    border-radius: 50%;
+    animation: spin 0.8s linear infinite;
+    margin-right: 8px;
+    vertical-align: middle;
+}
 """
 
 with gr.Blocks(title="Subtitle Generator") as demo:
@@ -124,16 +134,23 @@ with gr.Blocks(title="Subtitle Generator") as demo:
                 info="Reduce this for very long videos.",
             )
         generate_btn = gr.Button("Generate Subtitles", variant="primary")
-        status = gr.Textbox(label="Status", interactive=False, visible=False)
-        srt_output = gr.File(label="Download SRT", interactive=False, visible=False)
+        status = gr.HTML(visible=False)
+        srt_output = gr.File(label="Download SRT", interactive=False, visible=False, elem_classes="download-btn")
 
     def run(api_key, video_file, chunk_seconds, prompt):
         for status_text, srt_path in generate_subtitles(api_key, video_file, chunk_seconds, prompt):
             is_done = srt_path is not None
-            yield (
-                gr.update(value=status_text, visible=True),
-                gr.update(value=srt_path, visible=is_done),
-            )
+            if is_done:
+                yield (
+                    gr.update(value="", visible=False),
+                    gr.update(value=srt_path, visible=True),
+                )
+            else:
+                html = f'<div class="spinner" style="padding:12px 0;color:#ccc;font-size:1em;">{status_text}</div>'
+                yield (
+                    gr.update(value=html, visible=True),
+                    gr.update(visible=False),
+                )
 
     generate_btn.click(
         fn=run,
