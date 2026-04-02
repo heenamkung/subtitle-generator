@@ -75,5 +75,17 @@ This tool uses your own OpenAI API key. You are responsible for any charges incu
 
 - Transcription is billed per minute of audio. Check [OpenAI's pricing page](https://openai.com/pricing) for current rates.
 - A one-hour video will use approximately 60 minutes of audio transcription.
-- Your API key is stored locally in your `.env` file and is never sent anywhere other than directly to OpenAI.
+- Your API key is never stored — it's only used for the current session and sent directly to OpenAI.
 - Set usage limits on your OpenAI account at [platform.openai.com/account/limits](https://platform.openai.com/account/limits) to avoid unexpected charges.
+
+---
+
+## CLI usage
+
+If you prefer the command line:
+
+```bash
+python main.py /path/to/video.mp4
+```
+
+Run `python main.py --help` for all options.
