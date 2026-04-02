@@ -114,6 +114,7 @@ with gr.Blocks(title="Subtitle Generator") as demo:
             label="OpenAI API Key",
             placeholder="sk-...",
             type="password",
+            info="Don't have one? Get it at platform.openai.com/api-keys",
         )
         video_input = gr.File(
             label="Video File",
