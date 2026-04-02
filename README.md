@@ -1,4 +1,4 @@
-# YouTube Subtitle Generator
+# Subtitle Generator
 
 Generate high-quality `.srt` subtitle files from any video using OpenAI's transcription API.
 
@@ -84,3 +84,14 @@ Inside `output/<video-name>/`:
 - Files are split into chunks to stay within the 25 MB API limit
 - For best results, use clean audio source
 - If the video is very long, reduce `--chunk-seconds`
+
+---
+
+## API Key & Costs
+
+This tool uses your own OpenAI API key. You are responsible for any charges incurred on your OpenAI account.
+
+- Transcription is billed per minute of audio. Check [OpenAI's pricing page](https://openai.com/pricing) for current rates.
+- A one-hour video will use approximately 60 minutes of audio transcription.
+- Your API key is stored locally in your `.env` file and is never sent anywhere other than directly to OpenAI.
+- Set usage limits on your OpenAI account at [platform.openai.com/account/limits](https://platform.openai.com/account/limits) to avoid unexpected charges.
