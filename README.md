@@ -1,14 +1,12 @@
 # Subtitle Generator
 
-Generate high-quality `.srt` subtitle files from any video using OpenAI's transcription API.
-
-**video file → extracted audio → transcription → `.srt` subtitle file**
+Generate high-quality `.srt` subtitle files from any video using OpenAI's Whisper transcription API.
 
 ---
 
 ## Requirements
 
-- macOS
+- macOS (Apple Silicon or Intel)
 - Python 3.8+
 - ffmpeg
 - An OpenAI API key
@@ -23,67 +21,32 @@ Generate high-quality `.srt` subtitle files from any video using OpenAI's transc
 brew install ffmpeg
 ```
 
-### 2. Create a virtual environment and install dependencies
+### 2. Clone the repo and install dependencies
 
 ```bash
+git clone https://github.com/heenamkung/subtitle-generator.git
+cd subtitle-generator
 python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-### 3. Add your OpenAI API key
+### 3. Launch the app
 
 ```bash
-cp .env.example .env
+python app.py
 ```
 
-Open `.env` and set:
-
-```env
-OPENAI_API_KEY=your_api_key_here
-```
+The app will open automatically in your browser.
 
 ---
 
 ## Usage
 
-```bash
-python main.py /path/to/your/video.mp4
-```
-
-Choose output folder:
-
-```bash
-python main.py /path/to/your/video.mp4 --output-dir ./output
-```
-
-Use smaller chunks for long videos:
-
-```bash
-python main.py /path/to/your/video.mp4 --chunk-seconds 480
-```
-
----
-
-## Output
-
-Inside `output/<video-name>/`:
-
-| File | Description |
-|------|-------------|
-| `audio/source.mp3` | Extracted audio |
-| `chunks/*.mp3` | Chunked audio files |
-| `segments.json` | Transcript segments with timestamps |
-| `<video-name>.srt` | Final subtitle file |
-
----
-
-## Notes
-
-- Uses OpenAI's `whisper-1` model via the transcription API
-- Files are split into chunks to stay within the 25 MB API limit
-- For best results, use clean audio source
-- If the video is very long, reduce `--chunk-seconds`
+1. Enter your OpenAI API key
+2. Upload your video file
+3. Click **Generate Subtitles**
+4. Download the `.srt` file when done
 
 ---
 
