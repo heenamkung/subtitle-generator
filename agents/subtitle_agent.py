@@ -102,28 +102,61 @@ class SubtitleAgent:
 
         punctuated_text = " ".join(punctuated_parts)
 
-        # Step 4: map punctuated words back to word timestamps
+        # Step 4: map punctuated words back to word timestamps.
+        # Walk both lists in parallel. If the AI changed a word, skip it
+        # rather than cascading the error through every subsequent word.
         print(f"  Mapping punctuated text to {len(all_words)} word timestamps...")
         punctuated_words = punctuated_text.split()
         clean = re.compile(r'[^\w\s]', re.UNICODE)
-        word_index = 0
+        p_idx = 0
+        w_idx = 0
 
-        for p_word in punctuated_words:
+        while p_idx < len(punctuated_words) and w_idx < len(all_words):
+            p_word = punctuated_words[p_idx]
             p_clean = clean.sub("", p_word).lower()
+
             if not p_clean:
+                p_idx += 1
                 continue
-            # Find matching word in the stream and attach the punctuated version
-            for j in range(word_index, min(word_index + 10, len(all_words))):
-                candidate = clean.sub("", all_words[j].get("word", "")).lower()
-                if candidate == p_clean:
-                    all_words[j]["word"] = p_word  # replace with punctuated version
-                    word_index = j + 1
-                    break
+
+            w_clean = clean.sub("", all_words[w_idx].get("word", "")).lower()
+
+            if p_clean == w_clean:
+                # Match — copy punctuated version to the word stream
+                all_words[w_idx]["word"] = p_word
+                p_idx += 1
+                w_idx += 1
             else:
-                # Fuzzy fallback: overwrite next word
-                if word_index < len(all_words):
-                    all_words[word_index]["word"] = p_word
-                    word_index += 1
+                # Mismatch — try to re-sync by looking ahead in both lists
+                found = False
+
+                # Look ahead in original words (AI might have skipped a word)
+                for look_w in range(w_idx + 1, min(w_idx + 5, len(all_words))):
+                    if clean.sub("", all_words[look_w].get("word", "")).lower() == p_clean:
+                        # AI skipped some original words — advance original to match
+                        w_idx = look_w
+                        all_words[w_idx]["word"] = p_word
+                        p_idx += 1
+                        w_idx += 1
+                        found = True
+                        break
+
+                if not found:
+                    # Look ahead in punctuated words (AI might have inserted a word)
+                    for look_p in range(p_idx + 1, min(p_idx + 5, len(punctuated_words))):
+                        lp_clean = clean.sub("", punctuated_words[look_p]).lower()
+                        if lp_clean == w_clean:
+                            # AI inserted extra words — skip them
+                            p_idx = look_p
+                            all_words[w_idx]["word"] = punctuated_words[p_idx]
+                            p_idx += 1
+                            w_idx += 1
+                            found = True
+                            break
+
+                if not found:
+                    # Can't re-sync — keep original word, skip AI word, move on
+                    p_idx += 1
 
         # Step 5: rebuild segments from the now-punctuated word stream
         # and split at sentence boundaries using reformat_as_sentences
