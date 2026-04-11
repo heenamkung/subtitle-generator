@@ -1,12 +1,28 @@
 from __future__ import annotations
 
+import json
 import re
-from typing import Iterable, List
+from typing import Iterable, List, Optional
 
-from models import TranscriptSegment
+from openai import OpenAI
+
+from models import TranscriptSegment, WordTiming
 from utils.timecode import seconds_to_itt_timestamp, seconds_to_srt_timestamp
 
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
+
+_REFORMAT_SYSTEM_PROMPT = """\
+You are a subtitle formatter. You receive a raw transcript with pause markers.
+Your job is to split it into subtitle lines that:
+1. Each contain exactly one sentence or natural phrase.
+2. Are at most 84 characters long.
+3. Break at natural speech pauses (marked with [PAUSE]) when possible.
+4. Add proper punctuation (periods, commas, question marks) where missing.
+5. Do NOT change, add, or remove any words — only add punctuation and decide where to split lines.
+
+Return a JSON array of strings, where each string is one subtitle line.
+Example: ["Hey guys, this is HeeRin.", "Welcome back to another video.", "Today we have some merch to show."]
+Return ONLY the JSON array, no other text."""
 
 
 class SubtitleAgent:
@@ -14,57 +30,236 @@ class SubtitleAgent:
         self.max_chars_per_line = max_chars_per_line
         self.max_lines_per_block = max_lines_per_block
 
-    def reformat_as_sentences(self, segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
-        """Merge/split segments so each subtitle unit contains exactly one sentence."""
-        max_chars = self.max_chars_per_line * self.max_lines_per_block
+    def reformat_with_ai(
+        self,
+        segments: List[TranscriptSegment],
+        api_key: str,
+        model: str = "gpt-4o-mini",
+    ) -> List[TranscriptSegment]:
+        """Use an LLM to intelligently split the transcript into subtitle lines,
+        then map each line back to real word-level timestamps.
 
-        # Pass 1: split any segment that contains multiple sentences
-        split: List[TranscriptSegment] = []
-        for seg in segments:
-            parts = [p.strip() for p in _SENTENCE_BOUNDARY.split(seg.text.strip()) if p.strip()]
-            if len(parts) <= 1:
-                split.append(seg)
+        Args:
+            segments: Raw segments with word-level timestamps from WhisperX.
+            api_key: OpenAI API key.
+            model: LLM model to use (default: gpt-4o-mini, very cheap).
+
+        Returns:
+            Re-grouped TranscriptSegments with accurate timestamps.
+        """
+        # Step 1: flatten to a word stream
+        all_words = self._flatten_to_words(segments)
+        if not all_words:
+            return segments
+
+        # Step 2: build transcript text with [PAUSE] markers at silence gaps
+        pause_threshold = 0.5  # seconds
+        text_parts: List[str] = []
+        for i, w in enumerate(all_words):
+            word_text = w.get("word", "").strip()
+            if not word_text:
                 continue
-            duration = seg.end - seg.start
-            total_chars = sum(len(p) for p in parts)
-            cursor = seg.start
-            for part in parts:
-                part_dur = duration * len(part) / max(total_chars, 1)
-                split.append(TranscriptSegment(index=0, start=cursor, end=cursor + part_dur, text=part))
-                cursor += part_dur
+            # Insert [PAUSE] marker if there's a significant gap before this word
+            if i > 0 and "start" in w and "end" in all_words[i - 1]:
+                gap = w["start"] - all_words[i - 1]["end"]
+                if gap >= pause_threshold:
+                    text_parts.append("[PAUSE]")
+            text_parts.append(word_text)
 
-        # Pass 2: merge segments that don't end a sentence; force-break if too long
+        transcript_with_pauses = " ".join(text_parts)
+
+        # Step 3: ask the LLM to split into subtitle lines
+        client = OpenAI(api_key=api_key)
+        response = client.chat.completions.create(
+            model=model,
+            messages=[
+                {"role": "system", "content": _REFORMAT_SYSTEM_PROMPT},
+                {"role": "user", "content": transcript_with_pauses},
+            ],
+            temperature=0.0,
+            response_format={"type": "json_object"},
+        )
+
+        raw_json = response.choices[0].message.content or "[]"
+        parsed = json.loads(raw_json)
+        # Handle both {"lines": [...]} and [...] formats
+        if isinstance(parsed, dict):
+            subtitle_lines = parsed.get("lines") or parsed.get("subtitles") or list(parsed.values())[0]
+        else:
+            subtitle_lines = parsed
+
+        if not subtitle_lines or not isinstance(subtitle_lines, list):
+            # Fallback to basic reformatting if AI response is bad
+            print("  [warning] AI reformat failed, falling back to basic splitting")
+            return self.reformat_as_sentences(segments)
+
+        # Step 4: map each subtitle line back to word timestamps
+        # Strip punctuation for matching since AI may have added/changed it
+        clean = re.compile(r'[^\w\s]', re.UNICODE)
+        word_index = 0  # pointer into all_words
         result: List[TranscriptSegment] = []
+
+        for line in subtitle_lines:
+            line = line.strip()
+            if not line:
+                continue
+            line_tokens = line.split()
+            matched_words: List[WordTiming] = []
+
+            for token in line_tokens:
+                token_clean = clean.sub("", token).lower()
+                if not token_clean:
+                    continue
+                # Find the next matching word in the stream
+                search_start = word_index
+                found = False
+                for j in range(search_start, min(search_start + 10, len(all_words))):
+                    candidate = clean.sub("", all_words[j].get("word", "")).lower()
+                    if candidate == token_clean:
+                        matched_words.append(all_words[j])
+                        word_index = j + 1
+                        found = True
+                        break
+                if not found and word_index < len(all_words):
+                    # Fuzzy fallback: just take the next word
+                    matched_words.append(all_words[word_index])
+                    word_index += 1
+
+            if matched_words:
+                start = self._first_start(matched_words)
+                end = self._last_end(matched_words)
+                result.append(TranscriptSegment(
+                    index=0, start=start, end=end, text=line, words=matched_words,
+                ))
+
+        # Re-index
+        for i, seg in enumerate(result, start=1):
+            seg.index = i
+
+        return result if result else self.reformat_as_sentences(segments)
+
+    def reformat_as_sentences(self, segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
+        """Fallback: split segments using punctuation and max_chars only.
+
+        Uses word-level timestamps (when available) for accurate timing.
+        """
+        max_chars = self.max_chars_per_line * self.max_lines_per_block
+        all_words = self._flatten_to_words(segments)
+
+        if not all_words:
+            return segments
+
+        result: List[TranscriptSegment] = []
+        buf_words: List[WordTiming] = []
         buf_text = ""
-        buf_start = 0.0
-        buf_end = 0.0
 
-        for seg in split:
-            if not buf_text:
-                buf_start = seg.start
-            buf_text = f"{buf_text} {seg.text}".strip() if buf_text else seg.text
-            buf_end = seg.end
+        for i, w in enumerate(all_words):
+            word_text = w.get("word", "").strip()
+            if not word_text:
+                continue
 
-            ends_sentence = bool(re.search(r'[.!?]$', buf_text))
-            if ends_sentence or len(buf_text) > max_chars:
-                result.append(TranscriptSegment(index=0, start=buf_start, end=buf_end, text=buf_text))
+            buf_words.append(w)
+            buf_text = f"{buf_text} {word_text}".strip() if buf_text else word_text
+
+            # Check for natural break points
+            ends_sentence = bool(re.search(r'[.!?]$', word_text))
+            has_pause = False
+            if i + 1 < len(all_words) and "end" in w and "start" in all_words[i + 1]:
+                gap = all_words[i + 1]["start"] - w["end"]
+                has_pause = gap >= 0.5
+
+            if ends_sentence or len(buf_text) > max_chars or (has_pause and len(buf_text) > 20):
+                self._flush_buf(result, buf_words, buf_text)
+                buf_words = []
                 buf_text = ""
 
-        if buf_text:
-            result.append(TranscriptSegment(index=0, start=buf_start, end=buf_end, text=buf_text))
+        if buf_words:
+            self._flush_buf(result, buf_words, buf_text)
 
         for i, seg in enumerate(result, start=1):
             seg.index = i
 
         return result
 
-    def to_srt(self, segments: Iterable[TranscriptSegment]) -> str:
+    @staticmethod
+    def _flatten_to_words(segments: List[TranscriptSegment]) -> List[WordTiming]:
+        """Flatten segments into a single word stream with timestamps."""
+        all_words: List[WordTiming] = []
+        for seg in segments:
+            if seg.words:
+                all_words.extend(seg.words)
+            else:
+                tokens = seg.text.split()
+                if not tokens:
+                    continue
+                duration = seg.end - seg.start
+                total_chars = max(sum(len(t) for t in tokens), 1)
+                cursor = seg.start
+                for token in tokens:
+                    t_dur = duration * len(token) / total_chars
+                    all_words.append({"word": token, "start": cursor, "end": cursor + t_dur})
+                    cursor += t_dur
+        return all_words
+
+    @staticmethod
+    def _first_start(words: List[WordTiming]) -> float:
+        for w in words:
+            if "start" in w:
+                return w["start"]
+        return 0.0
+
+    @staticmethod
+    def _last_end(words: List[WordTiming]) -> float:
+        for w in reversed(words):
+            if "end" in w:
+                return w["end"]
+        return 0.0
+
+    @staticmethod
+    def _flush_buf(
+        result: List[TranscriptSegment],
+        buf_words: List[WordTiming],
+        buf_text: str,
+    ) -> None:
+        """Create a TranscriptSegment from buffered words."""
+        start = 0.0
+        end = 0.0
+        for w in buf_words:
+            if "start" in w:
+                start = w["start"]
+                break
+        for w in reversed(buf_words):
+            if "end" in w:
+                end = w["end"]
+                break
+        if end <= start and buf_words:
+            end = start + 0.5
+
+        result.append(TranscriptSegment(
+            index=0, start=start, end=end, text=buf_text, words=list(buf_words),
+        ))
+
+    def to_srt(self, segments: Iterable[TranscriptSegment], end_padding: float = 0.3) -> str:
+        """Convert segments to SRT format.
+
+        Args:
+            segments: Subtitle segments.
+            end_padding: Seconds to extend each subtitle's end time so it
+                         doesn't vanish the instant the last word is spoken.
+                         Capped so it never overlaps the next subtitle's start.
+        """
+        seg_list = list(segments)
         blocks: List[str] = []
-        for index, segment in enumerate(segments, start=1):
+        for i, segment in enumerate(seg_list):
+            padded_end = segment.end + end_padding
+            # Don't overlap the next subtitle
+            if i + 1 < len(seg_list):
+                padded_end = min(padded_end, seg_list[i + 1].start)
+
             start = seconds_to_srt_timestamp(segment.start)
-            end = seconds_to_srt_timestamp(segment.end)
+            end = seconds_to_srt_timestamp(padded_end)
             text = self._wrap_text(segment.text)
-            blocks.append(f"{index}\n{start} --> {end}\n{text}")
+            blocks.append(f"{i + 1}\n{start} --> {end}\n{text}")
         return "\n\n".join(blocks).strip() + "\n"
 
     def to_itt(self, segments: Iterable[TranscriptSegment], lang: str = "en") -> str:
