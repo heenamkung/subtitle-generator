@@ -43,174 +43,11 @@ def _key_from_file(file_path: str | None) -> str:
     return content.splitlines()[0].strip() if content else ""
 
 
-# ---------------------------------------------------------------------------
-# WhisperX pipeline (local, no API key)
-# ---------------------------------------------------------------------------
-def _generate_whisperx(
-    video_file: str, prompt: str, whisperx_model: str,
-    progress: gr.Progress = gr.Progress(),
-):
-    if not video_file:
-        raise gr.Error("Please upload a video file.")
-
-    input_video = Path(video_file)
-    work_dir = Path(tempfile.mkdtemp())
-
-    def on_progress(stage: str, pct: float) -> None:
-        label = "Transcribing" if stage == "transcribing" else "Aligning timestamps"
-        progress(pct / 100, desc=f"{label} — {pct:.0f}%")
-
-    try:
-        from skills.transcription_whisperx import WhisperXTranscriptionSkill
-
-        audio_dir = work_dir / "audio"
-        audio_dir.mkdir()
-
-        files = FileSkill()
-        audio_skill = AudioSkill()
-        subtitle_agent = SubtitleAgent()
-
-        progress(0, desc="Extracting audio...")
-
-        source_audio = audio_skill.extract_audio(
-            input_video=input_video,
-            output_audio=audio_dir / "source.mp3",
-            bitrate="64k",
-            sample_rate=16000,
-            channels=1,
-        )
-
-        # Check if model needs downloading or just loading from cache
-        from pathlib import Path as _P
-        _cache = _P.home() / ".cache" / "huggingface" / "hub" / f"models--Systran--faster-whisper-{whisperx_model}"
-        if _cache.exists() and not any(_cache.rglob("*.incomplete")):
-            progress(0, desc="Loading WhisperX model from cache...")
-        else:
-            progress(0, desc=f"Downloading WhisperX model '{whisperx_model}' (this only happens once)...")
-
-        skill = WhisperXTranscriptionSkill(
-            model_name=whisperx_model,
-            device="cpu",
-            compute_type="int8",
-            initial_prompt=prompt or "",
-        )
-
-        progress(0, desc="Transcribing — 0%...")
-
-        segments = skill.transcribe(
-            audio_path=source_audio,
-            progress_callback=on_progress,
-        )
-
-        if not segments:
-            raise gr.Error("No transcript segments were produced. Check your video has audio.")
-
-        # Use AI to intelligently split into readable subtitles
-        saved_key = _load_saved_key()
-        if saved_key:
-            progress(0.90, desc="AI is formatting subtitles...")
-            sentence_segments = subtitle_agent.reformat_with_ai(segments, api_key=saved_key)
-        else:
-            progress(0.90, desc="Building SRT file (no API key — using basic splitting)...")
-            sentence_segments = subtitle_agent.reformat_as_sentences(segments)
-
-        progress(0.95, desc="Building SRT file...")
-        srt_text = subtitle_agent.to_srt(sentence_segments)
-
-        stable_dir = Path(tempfile.mkdtemp())
-        stable_srt = stable_dir / "subtitle.srt"
-        files.save_text(stable_srt, srt_text)
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-        progress(1.0, desc="Done!")
-        return str(stable_srt)
-
-    except gr.Error:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise
-    except Exception as e:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise gr.Error(str(e))
-
-
-# ---------------------------------------------------------------------------
-# OpenAI API pipeline (requires API key)
-# ---------------------------------------------------------------------------
-def _generate_openai(api_key: str, video_file: str, chunk_seconds: int, prompt: str):
-    if not api_key or not api_key.strip():
-        raise gr.Error("Please enter your OpenAI API key.")
-    api_key = api_key.strip()
-    if not api_key.startswith("sk-"):
-        raise gr.Error("Invalid API key — OpenAI keys must start with 'sk-'.")
-    if len(api_key) < 40:
-        raise gr.Error("Invalid API key — key is too short.")
-    if not video_file:
-        raise gr.Error("Please upload a video file.")
-
-    from skills.transcription import TranscriptionSkill
-
-    input_video = Path(video_file)
-    work_dir = Path(tempfile.mkdtemp())
-
-    try:
-        audio_dir = work_dir / "audio"
-        chunks_dir = work_dir / "chunks"
-        audio_dir.mkdir()
-        chunks_dir.mkdir()
-
-        files = FileSkill()
-        audio_skill = AudioSkill()
-        transcription_skill = TranscriptionSkill(api_key=api_key)
-        subtitle_agent = SubtitleAgent()
-
-        yield "Extracting audio...", None
-
-        source_audio = audio_skill.extract_audio(
-            input_video=input_video,
-            output_audio=audio_dir / "source.mp3",
-            bitrate="64k",
-            sample_rate=16000,
-            channels=1,
-        )
-
-        yield "Splitting audio into chunks...", None
-
-        chunk_paths = audio_skill.split_audio(source_audio, chunks_dir, chunk_seconds)
-
-        all_chunk_segments = []
-        current_offset = 0.0
-        for i, chunk_path in enumerate(chunk_paths, start=1):
-            yield f"Transcribing chunk {i} of {len(chunk_paths)}...", None
-            chunk_segments = transcription_skill.transcribe_chunk(
-                audio_path=chunk_path,
-                time_offset=current_offset,
-                prompt=prompt or "",
-            )
-            all_chunk_segments.append(chunk_segments)
-            current_offset += audio_skill.get_duration_seconds(chunk_path)
-
-        merged_segments = transcription_skill.merge_segment_lists(all_chunk_segments)
-        if not merged_segments:
-            raise gr.Error("No transcript segments were produced. Check your video has audio.")
-
-        yield "Building SRT file...", None
-
-        sentence_segments = subtitle_agent.reformat_as_sentences(merged_segments)
-        srt_text = subtitle_agent.to_srt(sentence_segments)
-
-        stable_dir = Path(tempfile.mkdtemp())
-        stable_srt = stable_dir / "subtitle.srt"
-        files.save_text(stable_srt, srt_text)
-        shutil.rmtree(work_dir, ignore_errors=True)
-
-        yield "Done!", str(stable_srt)
-
-    except gr.Error:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise
-    except Exception as e:
-        shutil.rmtree(work_dir, ignore_errors=True)
-        raise gr.Error(str(e))
+def _status_html(text: str) -> str:
+    return (
+        f'<div style="padding:12px 0;color:#ccc;font-size:1em;">'
+        f'<span class="spinner"></span>{text}</div>'
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -238,21 +75,34 @@ with gr.Blocks(title="Subtitle Generator") as demo:
     with gr.Column(elem_classes="container"):
         gr.Markdown(
             "# Subtitle Generator\n"
-            "Generate `.srt` subtitle files from any video.\n\n"
-            "**WhisperX** runs locally (no API key, best timestamps). "
-            "**OpenAI API** is available as a fallback."
+            "Generate `.srt` subtitle files from any video using WhisperX.\n\n"
+            "Transcription runs **locally** on your machine. "
+            "An OpenAI API key is used for AI-powered subtitle formatting."
         )
 
-        engine_toggle = gr.Radio(
-            label="Transcription engine",
-            choices=["WhisperX (local)", "OpenAI API"],
-            value="WhisperX (local)",
+        video_input = gr.File(
+            label="Video File",
+            file_types=["video"],
+        )
+        whisperx_model = gr.Dropdown(
+            label="Whisper model",
+            choices=["large-v2", "medium", "small", "base", "tiny"],
+            value="medium",
+            info="medium: good balance of speed and accuracy. large-v2: best accuracy but slower.",
+        )
+        prompt_input = gr.Textbox(
+            label="Vocabulary hints",
+            placeholder="Names, brands, technical terms, show titles...",
+            info="Helps Whisper correctly spell proper nouns and uncommon words. Separate with commas.",
         )
 
-        # --- OpenAI API key section (hidden by default) ---
-        with gr.Column(visible=False) as openai_section:
+        with gr.Accordion("OpenAI API Key (for subtitle formatting)", open=False):
+            gr.Markdown(
+                "The API key is used by GPT-4o-mini to add punctuation and split subtitles into "
+                "natural sentences. Without it, basic splitting is used instead."
+            )
             api_key = gr.Textbox(
-                label="OpenAI API Key",
+                label="API Key",
                 placeholder="sk-...",
                 type="password",
                 value=_load_saved_key(),
@@ -266,77 +116,122 @@ with gr.Blocks(title="Subtitle Generator") as demo:
                 )
                 save_key_btn = gr.Button("Save key for next time", scale=1)
 
-        video_input = gr.File(
-            label="Video File",
-            file_types=["video"],
-        )
-        prompt_input = gr.Textbox(
-            label="Vocabulary hints",
-            placeholder="Names, brands, technical terms, show titles...",
-            info="Helps Whisper correctly spell proper nouns and uncommon words. Separate with commas.",
-        )
-
-        with gr.Accordion("Advanced options", open=False):
-            whisperx_model = gr.Dropdown(
-                label="WhisperX model",
-                choices=["large-v2", "medium", "small", "base", "tiny"],
-                value="large-v2",
-                info="large-v2: best accuracy. smaller = faster but less accurate.",
-            )
-            chunk_seconds = gr.Slider(
-                label="Chunk size (seconds) — OpenAI only",
-                minimum=60,
-                maximum=1200,
-                value=600,
-                step=60,
-                info="Only used with OpenAI API engine.",
-            )
-
         generate_btn = gr.Button("Generate Subtitles", variant="primary")
         status = gr.HTML(visible=False)
-        srt_output = gr.File(label="Download SRT", interactive=False, visible=False, elem_classes="download-btn")
-
-    # --- Toggle OpenAI section visibility ---
-    def toggle_engine(engine):
-        return gr.update(visible=(engine == "OpenAI API"))
-
-    engine_toggle.change(
-        fn=toggle_engine,
-        inputs=[engine_toggle],
-        outputs=[openai_section],
-    )
+        srt_output = gr.File(label="Download SRT", interactive=False, elem_classes="download-btn")
 
     # --- Key file helpers ---
     key_file.change(fn=_key_from_file, inputs=[key_file], outputs=[api_key])
     save_key_btn.click(fn=_save_key, inputs=[api_key], outputs=[])
 
-    # --- Main generation ---
-    def run(engine, api_key, video_file, chunk_seconds, prompt, whisperx_model, progress=gr.Progress()):
-        if engine == "WhisperX (local)":
-            # WhisperX uses gr.Progress directly for real-time updates
-            srt_path = _generate_whisperx(video_file, prompt, whisperx_model, progress)
+    # --- Main generation (generator for real-time UI updates) ---
+    def run(video_file, whisperx_model_name, prompt):
+        if not video_file:
+            raise gr.Error("Please upload a video file.")
+
+        input_video = Path(video_file)
+        work_dir = Path(tempfile.mkdtemp())
+
+        try:
+            from skills.transcription_whisperx import WhisperXTranscriptionSkill
+
+            audio_dir = work_dir / "audio"
+            audio_dir.mkdir()
+
+            files = FileSkill()
+            audio_skill = AudioSkill()
+            subtitle_agent = SubtitleAgent()
+
+            # --- Extracting audio ---
+            yield (
+                gr.update(value=_status_html("Extracting audio..."), visible=True),
+                gr.update(),
+            )
+
+            source_audio = audio_skill.extract_audio(
+                input_video=input_video,
+                output_audio=audio_dir / "source.mp3",
+                bitrate="64k",
+                sample_rate=16000,
+                channels=1,
+            )
+
+            # --- Loading model ---
+            _cache = Path.home() / ".cache" / "huggingface" / "hub" / f"models--Systran--faster-whisper-{whisperx_model_name}"
+            if _cache.exists() and not any(_cache.rglob("*.incomplete")):
+                msg = "Loading WhisperX model from cache..."
+            else:
+                msg = f"Downloading WhisperX model '{whisperx_model_name}' (this only happens once)..."
+
+            yield (
+                gr.update(value=_status_html(msg), visible=True),
+                gr.update(),
+            )
+
+            skill = WhisperXTranscriptionSkill(
+                model_name=whisperx_model_name,
+                device="cpu",
+                compute_type="int8",
+                initial_prompt=prompt or "",
+            )
+
+            # --- Transcribing (VAD + Whisper + alignment) ---
+            yield (
+                gr.update(value=_status_html("Detecting speech and transcribing..."), visible=True),
+                gr.update(),
+            )
+
+            segments = skill.transcribe(audio_path=source_audio)
+
+            if not segments:
+                raise gr.Error("No transcript segments were produced. Check your video has audio.")
+
+            # --- AI formatting ---
+            saved_key = _load_saved_key()
+            if saved_key:
+                yield (
+                    gr.update(value=_status_html("AI is formatting subtitles..."), visible=True),
+                    gr.update(),
+                )
+                sentence_segments = subtitle_agent.reformat_with_ai(segments, api_key=saved_key)
+            else:
+                yield (
+                    gr.update(value=_status_html("Formatting subtitles (no API key — basic splitting)..."), visible=True),
+                    gr.update(),
+                )
+                sentence_segments = subtitle_agent.reformat_as_sentences(segments)
+
+            # --- Building SRT ---
+            yield (
+                gr.update(value=_status_html("Building SRT file..."), visible=True),
+                gr.update(),
+            )
+
+            duration_segments = subtitle_agent.enforce_max_duration(sentence_segments, max_duration=3.0)
+            final_segments = subtitle_agent.merge_orphans(duration_segments)
+            srt_text = subtitle_agent.to_srt(final_segments)
+
+            stable_dir = Path(tempfile.mkdtemp())
+            stable_srt = stable_dir / "subtitle.srt"
+            files.save_text(stable_srt, srt_text)
+            shutil.rmtree(work_dir, ignore_errors=True)
+            print(f"  Done! SRT saved to: {stable_srt}")
+
             yield (
                 gr.update(value="", visible=False),
-                gr.update(value=srt_path, visible=True),
+                gr.update(value=str(stable_srt)),
             )
-        else:
-            # OpenAI API uses the yield/generator pattern
-            for status_text, srt_path in _generate_openai(api_key, video_file, chunk_seconds, prompt):
-                if srt_path is not None:
-                    yield (
-                        gr.update(value="", visible=False),
-                        gr.update(value=srt_path, visible=True),
-                    )
-                else:
-                    html = f'<div class="spinner" style="padding:12px 0;color:#ccc;font-size:1em;">{status_text}</div>'
-                    yield (
-                        gr.update(value=html, visible=True),
-                        gr.update(visible=False),
-                    )
+
+        except gr.Error:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise
+        except Exception as e:
+            shutil.rmtree(work_dir, ignore_errors=True)
+            raise gr.Error(str(e))
 
     generate_btn.click(
         fn=run,
-        inputs=[engine_toggle, api_key, video_input, chunk_seconds, prompt_input, whisperx_model],
+        inputs=[video_input, whisperx_model, prompt_input],
         outputs=[status, srt_output],
     )
 

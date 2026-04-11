@@ -11,22 +11,22 @@ from utils.timecode import seconds_to_itt_timestamp, seconds_to_srt_timestamp
 
 _SENTENCE_BOUNDARY = re.compile(r'(?<=[.!?])\s+')
 
-_REFORMAT_SYSTEM_PROMPT = """\
-You are a subtitle formatter. You receive a raw transcript with pause markers.
-Your job is to split it into subtitle lines that:
-1. Each contain exactly one sentence or natural phrase.
-2. Are at most 84 characters long.
-3. Break at natural speech pauses (marked with [PAUSE]) when possible.
-4. Add proper punctuation (periods, commas, question marks) where missing.
-5. Do NOT change, add, or remove any words — only add punctuation and decide where to split lines.
+_PUNCTUATION_SYSTEM_PROMPT = """\
+You are a punctuation corrector. You receive a raw speech transcript with [PAUSE] markers.
+Your ONLY job is to add proper punctuation (periods, commas, question marks, exclamation marks) where missing.
 
-Return a JSON array of strings, where each string is one subtitle line.
-Example: ["Hey guys, this is HeeRin.", "Welcome back to another video.", "Today we have some merch to show."]
-Return ONLY the JSON array, no other text."""
+Rules:
+1. Do NOT change, add, or remove any words — only add punctuation marks.
+2. Remove [PAUSE] markers from the output.
+3. Every sentence must end with a period, question mark, or exclamation mark.
+4. Use commas for natural pauses within sentences.
+5. Return the full punctuated text as a single string.
+
+Return a JSON object: {"text": "The punctuated transcript here."}"""
 
 
 class SubtitleAgent:
-    def __init__(self, max_chars_per_line: int = 42, max_lines_per_block: int = 2) -> None:
+    def __init__(self, max_chars_per_line: int = 35, max_lines_per_block: int = 1) -> None:
         self.max_chars_per_line = max_chars_per_line
         self.max_lines_per_block = max_lines_per_block
 
@@ -36,8 +36,9 @@ class SubtitleAgent:
         api_key: str,
         model: str = "gpt-4o-mini",
     ) -> List[TranscriptSegment]:
-        """Use an LLM to intelligently split the transcript into subtitle lines,
-        then map each line back to real word-level timestamps.
+        """Two-step AI formatting:
+        1. AI adds punctuation to the raw transcript (simple, reliable task).
+        2. Our code splits at sentence boundaries using real word timestamps.
 
         Args:
             segments: Raw segments with word-level timestamps from WhisperX.
@@ -59,7 +60,6 @@ class SubtitleAgent:
             word_text = w.get("word", "").strip()
             if not word_text:
                 continue
-            # Insert [PAUSE] marker if there's a significant gap before this word
             if i > 0 and "start" in w and "end" in all_words[i - 1]:
                 gap = w["start"] - all_words[i - 1]["end"]
                 if gap >= pause_threshold:
@@ -68,75 +68,75 @@ class SubtitleAgent:
 
         transcript_with_pauses = " ".join(text_parts)
 
-        # Step 3: ask the LLM to split into subtitle lines
+        # Step 3: ask AI to add punctuation only (chunked for long transcripts)
+        chunks = self._split_for_api(transcript_with_pauses, max_chunk_chars=2000)
         client = OpenAI(api_key=api_key)
-        response = client.chat.completions.create(
-            model=model,
-            messages=[
-                {"role": "system", "content": _REFORMAT_SYSTEM_PROMPT},
-                {"role": "user", "content": transcript_with_pauses},
-            ],
-            temperature=0.0,
-            response_format={"type": "json_object"},
-        )
+        punctuated_parts: List[str] = []
 
-        raw_json = response.choices[0].message.content or "[]"
-        parsed = json.loads(raw_json)
-        # Handle both {"lines": [...]} and [...] formats
-        if isinstance(parsed, dict):
-            subtitle_lines = parsed.get("lines") or parsed.get("subtitles") or list(parsed.values())[0]
-        else:
-            subtitle_lines = parsed
+        for chunk_i, chunk_text in enumerate(chunks, start=1):
+            print(f"  AI adding punctuation chunk {chunk_i}/{len(chunks)}...")
+            try:
+                response = client.chat.completions.create(
+                    model=model,
+                    messages=[
+                        {"role": "system", "content": _PUNCTUATION_SYSTEM_PROMPT},
+                        {"role": "user", "content": chunk_text},
+                    ],
+                    temperature=0.0,
+                    response_format={"type": "json_object"},
+                    timeout=60,
+                )
 
-        if not subtitle_lines or not isinstance(subtitle_lines, list):
-            # Fallback to basic reformatting if AI response is bad
-            print("  [warning] AI reformat failed, falling back to basic splitting")
-            return self.reformat_as_sentences(segments)
+                raw_json = response.choices[0].message.content or "{}"
+                parsed = json.loads(raw_json)
+                text = parsed.get("text", "") if isinstance(parsed, dict) else ""
+                if text:
+                    punctuated_parts.append(text)
+                else:
+                    print(f"  [warning] AI returned no text for chunk {chunk_i}")
+                    # Use original chunk without [PAUSE] markers as fallback
+                    punctuated_parts.append(chunk_text.replace("[PAUSE]", ""))
+            except Exception as e:
+                print(f"  [warning] AI punctuation failed for chunk {chunk_i}: {e}")
+                punctuated_parts.append(chunk_text.replace("[PAUSE]", ""))
 
-        # Step 4: map each subtitle line back to word timestamps
-        # Strip punctuation for matching since AI may have added/changed it
+        punctuated_text = " ".join(punctuated_parts)
+
+        # Step 4: map punctuated words back to word timestamps
+        print(f"  Mapping punctuated text to {len(all_words)} word timestamps...")
+        punctuated_words = punctuated_text.split()
         clean = re.compile(r'[^\w\s]', re.UNICODE)
-        word_index = 0  # pointer into all_words
-        result: List[TranscriptSegment] = []
+        word_index = 0
 
-        for line in subtitle_lines:
-            line = line.strip()
-            if not line:
+        for p_word in punctuated_words:
+            p_clean = clean.sub("", p_word).lower()
+            if not p_clean:
                 continue
-            line_tokens = line.split()
-            matched_words: List[WordTiming] = []
-
-            for token in line_tokens:
-                token_clean = clean.sub("", token).lower()
-                if not token_clean:
-                    continue
-                # Find the next matching word in the stream
-                search_start = word_index
-                found = False
-                for j in range(search_start, min(search_start + 10, len(all_words))):
-                    candidate = clean.sub("", all_words[j].get("word", "")).lower()
-                    if candidate == token_clean:
-                        matched_words.append(all_words[j])
-                        word_index = j + 1
-                        found = True
-                        break
-                if not found and word_index < len(all_words):
-                    # Fuzzy fallback: just take the next word
-                    matched_words.append(all_words[word_index])
+            # Find matching word in the stream and attach the punctuated version
+            for j in range(word_index, min(word_index + 10, len(all_words))):
+                candidate = clean.sub("", all_words[j].get("word", "")).lower()
+                if candidate == p_clean:
+                    all_words[j]["word"] = p_word  # replace with punctuated version
+                    word_index = j + 1
+                    break
+            else:
+                # Fuzzy fallback: overwrite next word
+                if word_index < len(all_words):
+                    all_words[word_index]["word"] = p_word
                     word_index += 1
 
-            if matched_words:
-                start = self._first_start(matched_words)
-                end = self._last_end(matched_words)
-                result.append(TranscriptSegment(
-                    index=0, start=start, end=end, text=line, words=matched_words,
-                ))
+        # Step 5: rebuild segments from the now-punctuated word stream
+        # and split at sentence boundaries using reformat_as_sentences
+        full_text = " ".join(w.get("word", "") for w in all_words).strip()
+        combined = TranscriptSegment(
+            index=1,
+            start=self._first_start(all_words),
+            end=self._last_end(all_words),
+            text=full_text,
+            words=list(all_words),
+        )
 
-        # Re-index
-        for i, seg in enumerate(result, start=1):
-            seg.index = i
-
-        return result if result else self.reformat_as_sentences(segments)
+        return self.reformat_as_sentences([combined])
 
     def reformat_as_sentences(self, segments: List[TranscriptSegment]) -> List[TranscriptSegment]:
         """Fallback: split segments using punctuation and max_chars only.
@@ -180,6 +180,31 @@ class SubtitleAgent:
             seg.index = i
 
         return result
+
+    @staticmethod
+    def _split_for_api(text: str, max_chunk_chars: int = 2000) -> List[str]:
+        """Split transcript text into chunks at [PAUSE] markers."""
+        if len(text) <= max_chunk_chars:
+            return [text]
+
+        chunks: List[str] = []
+        current = ""
+        # Split on [PAUSE] markers as natural break points
+        parts = text.split("[PAUSE]")
+        for part in parts:
+            part = part.strip()
+            if not part:
+                continue
+            candidate = f"{current} [PAUSE] {part}".strip() if current else part
+            if len(candidate) > max_chunk_chars and current:
+                chunks.append(current.strip())
+                current = part
+            else:
+                current = candidate
+        if current.strip():
+            chunks.append(current.strip())
+
+        return chunks if chunks else [text]
 
     @staticmethod
     def _flatten_to_words(segments: List[TranscriptSegment]) -> List[WordTiming]:
@@ -239,6 +264,137 @@ class SubtitleAgent:
             index=0, start=start, end=end, text=buf_text, words=list(buf_words),
         ))
 
+    def merge_orphans(
+        self, segments: List[TranscriptSegment], max_words: int = 2, max_gap: float = 0.5
+    ) -> List[TranscriptSegment]:
+        """Merge very short subtitles (≤max_words) into their neighbor.
+
+        Tries the previous subtitle first, then next. Only merges if:
+        - Combined text stays under max_chars_per_line
+        - Time gap between them is ≤max_gap seconds
+        """
+        if len(segments) < 2:
+            return segments
+
+        max_chars = self.max_chars_per_line
+        merged: List[TranscriptSegment] = list(segments)
+        changed = True
+
+        # Keep merging until no more changes (handles consecutive orphans)
+        while changed:
+            changed = False
+            new_list: List[TranscriptSegment] = []
+            skip_next = False
+
+            for i, seg in enumerate(merged):
+                if skip_next:
+                    skip_next = False
+                    continue
+
+                word_count = len(seg.text.split())
+                if word_count > max_words:
+                    new_list.append(seg)
+                    continue
+
+                # Try merging with previous
+                if new_list:
+                    prev = new_list[-1]
+                    gap = seg.start - prev.end
+                    combined = f"{prev.text} {seg.text}"
+                    if gap <= max_gap and len(combined) <= max_chars:
+                        new_list[-1] = TranscriptSegment(
+                            index=0,
+                            start=prev.start,
+                            end=seg.end,
+                            text=combined,
+                            words=prev.words + seg.words,
+                        )
+                        changed = True
+                        continue
+
+                # Try merging with next
+                if i + 1 < len(merged):
+                    nxt = merged[i + 1]
+                    gap = nxt.start - seg.end
+                    combined = f"{seg.text} {nxt.text}"
+                    if gap <= max_gap and len(combined) <= max_chars:
+                        new_list.append(TranscriptSegment(
+                            index=0,
+                            start=seg.start,
+                            end=nxt.end,
+                            text=combined,
+                            words=seg.words + nxt.words,
+                        ))
+                        skip_next = True
+                        changed = True
+                        continue
+
+                # Can't merge — keep as-is
+                new_list.append(seg)
+
+            merged = new_list
+
+        for i, seg in enumerate(merged, start=1):
+            seg.index = i
+
+        return merged
+
+    def enforce_max_duration(
+        self, segments: List[TranscriptSegment], max_duration: float = 3.0
+    ) -> List[TranscriptSegment]:
+        """Split any subtitle that lasts longer than max_duration seconds.
+
+        Uses word-level timestamps to find the best split point.
+        Prevents subtitles from lingering on screen when speech is slow.
+        """
+        result: List[TranscriptSegment] = []
+
+        for seg in segments:
+            duration = seg.end - seg.start
+            if duration <= max_duration or not seg.words or len(seg.words) < 2:
+                result.append(seg)
+                continue
+
+            # Split at word boundary closest to max_duration intervals
+            current_words: List[WordTiming] = []
+            current_start: float = seg.start
+
+            for w in seg.words:
+                current_words.append(w)
+                w_end = w.get("end", seg.end)
+                elapsed = w_end - current_start
+
+                if elapsed >= max_duration and len(current_words) >= 1:
+                    text = " ".join(cw.get("word", "") for cw in current_words).strip()
+                    if text:
+                        result.append(TranscriptSegment(
+                            index=0,
+                            start=current_start,
+                            end=w_end,
+                            text=text,
+                            words=list(current_words),
+                        ))
+                    current_words = []
+                    # Next subtitle starts at the next word
+                    current_start = w_end
+
+            # Flush remaining words
+            if current_words:
+                text = " ".join(cw.get("word", "") for cw in current_words).strip()
+                if text:
+                    result.append(TranscriptSegment(
+                        index=0,
+                        start=current_start,
+                        end=seg.end,
+                        text=text,
+                        words=list(current_words),
+                    ))
+
+        for i, seg in enumerate(result, start=1):
+            seg.index = i
+
+        return result
+
     def to_srt(self, segments: Iterable[TranscriptSegment], end_padding: float = 0.3) -> str:
         """Convert segments to SRT format.
 
@@ -258,7 +414,8 @@ class SubtitleAgent:
 
             start = seconds_to_srt_timestamp(segment.start)
             end = seconds_to_srt_timestamp(padded_end)
-            text = self._wrap_text(segment.text)
+            # Single line only — no wrapping
+            text = segment.text.strip()
             blocks.append(f"{i + 1}\n{start} --> {end}\n{text}")
         return "\n\n".join(blocks).strip() + "\n"
 

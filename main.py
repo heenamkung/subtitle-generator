@@ -158,7 +158,9 @@ def main() -> None:
     else:
         print(f"[{step}] Building SRT file (no API key — using basic splitting)")
         sentence_segments = subtitle_agent.reformat_as_sentences(segments)
-    srt_text = subtitle_agent.to_srt(sentence_segments)
+    duration_segments = subtitle_agent.enforce_max_duration(sentence_segments, max_duration=3.0)
+    final_segments = subtitle_agent.merge_orphans(duration_segments)
+    srt_text = subtitle_agent.to_srt(final_segments)
 
     final_step = "4/4" if args.engine == "whisperx" else "4/4"
     print(f"[{final_step}] Saving output files")
