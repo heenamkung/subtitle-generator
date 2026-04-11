@@ -303,13 +303,16 @@ class SubtitleAgent:
         """Merge very short subtitles (≤max_words) into their neighbor.
 
         Tries the previous subtitle first, then next. Only merges if:
-        - Combined text stays under max_chars_per_line
+        - Combined text stays under the orphan char limit (more lenient than
+          the normal max so orphans always get absorbed)
         - Time gap between them is ≤max_gap seconds
         """
         if len(segments) < 2:
             return segments
 
-        max_chars = self.max_chars_per_line
+        # Allow up to 50 chars when absorbing orphans — a slightly long
+        # subtitle is much better than a single word flashing on screen.
+        max_chars = self.max_chars_per_line + 15
         merged: List[TranscriptSegment] = list(segments)
         changed = True
 
