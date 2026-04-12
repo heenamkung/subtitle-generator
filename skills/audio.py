@@ -84,4 +84,10 @@ class AudioSkill:
         result = subprocess.run(cmd, capture_output=True, text=True)
         if result.returncode != 0:
             stderr = result.stderr.strip()
-            raise RuntimeError(f"{error_message}.\n\nCommand: {' '.join(cmd)}\n\n{stderr}")
+            # Extract just the last meaningful line from ffmpeg's verbose output
+            last_lines = [l for l in stderr.splitlines() if l.strip()]
+            short_err = last_lines[-1] if last_lines else "Unknown error"
+            raise RuntimeError(
+                f"{error_message}: {short_err}\n\n"
+                f"(Full ffmpeg output: {stderr[-500:] if len(stderr) > 500 else stderr})"
+            )

@@ -8,9 +8,30 @@ import gradio as gr
 
 from agents.subtitle_agent import SubtitleAgent
 from skills.audio import AudioSkill
+from skills.fcpxml import parse_srt, generate_fcpxml
 from skills.files import FileSkill
 
 _ENV_PATH = Path(__file__).parent / ".env"
+
+# Motion template: bundled in repo, auto-installed to FCP's template folder on startup
+_TEMPLATE_NAME = "Tap5a Multiline Text Backgr. 2.moti"
+_TEMPLATE_SRC = Path(__file__).parent / "templates" / _TEMPLATE_NAME
+_TEMPLATE_DST = (
+    Path.home() / "Movies" / "Motion Templates.localized"
+    / "Titles.localized" / "Tap5a" / _TEMPLATE_NAME
+)
+
+
+def _install_motion_template() -> None:
+    """Copy the bundled Motion template to FCP's template folder if not already there."""
+    if _TEMPLATE_DST.exists():
+        return
+    _TEMPLATE_DST.parent.mkdir(parents=True, exist_ok=True)
+    shutil.copy2(_TEMPLATE_SRC, _TEMPLATE_DST)
+    print(f"  Installed Motion template → {_TEMPLATE_DST}")
+
+
+_install_motion_template()
 
 
 def _load_saved_key() -> str:
@@ -24,6 +45,8 @@ def _load_saved_key() -> str:
 
 def _save_key(api_key: str) -> None:
     key = api_key.strip()
+    if not key:
+        return  # Don't overwrite saved key with empty string
     if _ENV_PATH.exists():
         lines = [l for l in _ENV_PATH.read_text(encoding="utf-8").splitlines()
                  if not l.startswith("OPENAI_API_KEY=")]
@@ -33,14 +56,6 @@ def _save_key(api_key: str) -> None:
     _ENV_PATH.write_text("\n".join(lines) + "\n", encoding="utf-8")
 
 
-def _key_from_file(file_path: str | None) -> str:
-    if not file_path:
-        return ""
-    content = Path(file_path).read_text(encoding="utf-8").strip()
-    for line in content.splitlines():
-        if line.startswith("OPENAI_API_KEY="):
-            return line.split("=", 1)[1].strip().strip('"').strip("'")
-    return content.splitlines()[0].strip() if content else ""
 
 
 def _status_html(text: str) -> str:
@@ -71,13 +86,13 @@ css = """
 }
 """
 
-with gr.Blocks(title="Subtitle Generator") as demo:
+with gr.Blocks(title="Subtitle Generator", css=css) as demo:
     with gr.Column(elem_classes="container"):
+        gr.Markdown("# Subtitle Generator")
         gr.Markdown(
-            "# Subtitle Generator\n"
-            "Generate `.srt` subtitle files from any video using WhisperX.\n\n"
-            "Transcription runs **locally** on your machine. "
-            "An OpenAI API key is used for AI-powered subtitle formatting."
+            "Generate `.srt` and `.fcpxml` subtitle files from any video using WhisperX.\n\n"
+            "Transcription runs **locally** — no audio is uploaded. "
+            "An optional OpenAI API key enables AI-powered punctuation and natural sentence splitting."
         )
 
         video_input = gr.File(
@@ -87,12 +102,12 @@ with gr.Blocks(title="Subtitle Generator") as demo:
         whisperx_model = gr.Dropdown(
             label="Whisper model",
             choices=["large-v2", "medium", "small", "base", "tiny"],
-            value="medium",
-            info="medium: good balance of speed and accuracy. large-v2: best accuracy but slower.",
+            value="large-v2",
+            info="large-v2: best accuracy but slower. medium: good balance of speed and accuracy.",
         )
         prompt_input = gr.Textbox(
             label="Vocabulary hints",
-            placeholder="Names, brands, technical terms, show titles...",
+            placeholder="Anime names, character names, brands, technical terms...",
             info="Helps Whisper correctly spell proper nouns and uncommon words. Separate with commas.",
         )
 
@@ -108,24 +123,20 @@ with gr.Blocks(title="Subtitle Generator") as demo:
                 value=_load_saved_key(),
                 info="Don't have one? Get it at platform.openai.com/api-keys",
             )
-            with gr.Row():
-                key_file = gr.File(
-                    label="Or drag & drop a key file (.txt or .env)",
-                    file_types=[".txt", ".env"],
-                    scale=3,
-                )
-                save_key_btn = gr.Button("Save key for next time", scale=1)
 
         generate_btn = gr.Button("Generate Subtitles", variant="primary")
-        status = gr.HTML(visible=False)
-        srt_output = gr.File(label="Download SRT", interactive=False, elem_classes="download-btn")
+        gen_status = gr.HTML(visible=False)
+        with gr.Row():
+            srt_output = gr.File(label="Download SRT", interactive=False, elem_classes="download-btn")
+            fcpxml_gen_output = gr.File(label="Download FCPXML", interactive=False, elem_classes="download-btn")
 
-    # --- Key file helpers ---
-    key_file.change(fn=_key_from_file, inputs=[key_file], outputs=[api_key])
-    save_key_btn.click(fn=_save_key, inputs=[api_key], outputs=[])
+    # ------------------------------------------------------------------
+    # Handlers
+    # ------------------------------------------------------------------
+    # Auto-save the key whenever the user changes it (no separate Save button needed)
+    api_key.change(fn=_save_key, inputs=[api_key], outputs=[])
 
-    # --- Main generation (generator for real-time UI updates) ---
-    def run(video_file, whisperx_model_name, prompt):
+    def run_generate(video_file, whisperx_model_name, prompt, openai_key):
         if not video_file:
             raise gr.Error("Please upload a video file.")
 
@@ -133,7 +144,7 @@ with gr.Blocks(title="Subtitle Generator") as demo:
         work_dir = Path(tempfile.mkdtemp())
 
         try:
-            from skills.transcription_whisperx import WhisperXTranscriptionSkill
+            from skills.transcription_whisperx import WhisperXTranscriptionSkill  # lazy: heavy deps
 
             audio_dir = work_dir / "audio"
             audio_dir.mkdir()
@@ -142,9 +153,9 @@ with gr.Blocks(title="Subtitle Generator") as demo:
             audio_skill = AudioSkill()
             subtitle_agent = SubtitleAgent()
 
-            # --- Extracting audio ---
             yield (
                 gr.update(value=_status_html("Extracting audio..."), visible=True),
+                gr.update(),
                 gr.update(),
             )
 
@@ -156,7 +167,6 @@ with gr.Blocks(title="Subtitle Generator") as demo:
                 channels=1,
             )
 
-            # --- Loading model ---
             _cache = Path.home() / ".cache" / "huggingface" / "hub" / f"models--Systran--faster-whisper-{whisperx_model_name}"
             if _cache.exists() and not any(_cache.rglob("*.incomplete")):
                 msg = "Loading WhisperX model from cache..."
@@ -165,6 +175,7 @@ with gr.Blocks(title="Subtitle Generator") as demo:
 
             yield (
                 gr.update(value=_status_html(msg), visible=True),
+                gr.update(),
                 gr.update(),
             )
 
@@ -175,9 +186,9 @@ with gr.Blocks(title="Subtitle Generator") as demo:
                 initial_prompt=prompt or "",
             )
 
-            # --- Transcribing (VAD + Whisper + alignment) ---
             yield (
                 gr.update(value=_status_html("Detecting speech and transcribing..."), visible=True),
+                gr.update(),
                 gr.update(),
             )
 
@@ -186,24 +197,26 @@ with gr.Blocks(title="Subtitle Generator") as demo:
             if not segments:
                 raise gr.Error("No transcript segments were produced. Check your video has audio.")
 
-            # --- AI formatting ---
-            saved_key = _load_saved_key()
-            if saved_key:
+            # Use the key from UI input (falls back to saved key if UI is empty)
+            effective_key = (openai_key or "").strip() or _load_saved_key()
+            if effective_key:
                 yield (
                     gr.update(value=_status_html("AI is formatting subtitles..."), visible=True),
                     gr.update(),
+                    gr.update(),
                 )
-                sentence_segments = subtitle_agent.reformat_with_ai(segments, api_key=saved_key)
+                sentence_segments = subtitle_agent.reformat_with_ai(segments, api_key=effective_key)
             else:
                 yield (
                     gr.update(value=_status_html("Formatting subtitles (no API key — basic splitting)..."), visible=True),
                     gr.update(),
+                    gr.update(),
                 )
                 sentence_segments = subtitle_agent.reformat_as_sentences(segments)
 
-            # --- Building SRT ---
             yield (
-                gr.update(value=_status_html("Building SRT file..."), visible=True),
+                gr.update(value=_status_html("Building subtitle files..."), visible=True),
+                gr.update(),
                 gr.update(),
             )
 
@@ -211,15 +224,22 @@ with gr.Blocks(title="Subtitle Generator") as demo:
             final_segments = subtitle_agent.merge_orphans(duration_segments)
             srt_text = subtitle_agent.to_srt(final_segments)
 
+            # Also generate FCPXML from the SRT
+            fcpxml_entries = parse_srt(srt_text)
+            fcpxml_text = generate_fcpxml(subtitles=fcpxml_entries)
+
             stable_dir = Path(tempfile.mkdtemp())
             stable_srt = stable_dir / "subtitle.srt"
+            stable_fcpxml = stable_dir / "subtitle.fcpxml"
             files.save_text(stable_srt, srt_text)
+            files.save_text(stable_fcpxml, fcpxml_text)
             shutil.rmtree(work_dir, ignore_errors=True)
-            print(f"  Done! SRT saved to: {stable_srt}")
+            print(f"  Done! SRT: {stable_srt}, FCPXML: {stable_fcpxml}")
 
             yield (
                 gr.update(value="", visible=False),
                 gr.update(value=str(stable_srt)),
+                gr.update(value=str(stable_fcpxml)),
             )
 
         except gr.Error:
@@ -230,11 +250,12 @@ with gr.Blocks(title="Subtitle Generator") as demo:
             raise gr.Error(str(e))
 
     generate_btn.click(
-        fn=run,
-        inputs=[video_input, whisperx_model, prompt_input],
-        outputs=[status, srt_output],
+        fn=run_generate,
+        inputs=[video_input, whisperx_model, prompt_input, api_key],
+        outputs=[gen_status, srt_output, fcpxml_gen_output],
     )
 
 
+
 if __name__ == "__main__":
-    demo.launch(inbrowser=True, css=css)
+    demo.launch(inbrowser=True)

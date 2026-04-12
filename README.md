@@ -1,17 +1,21 @@
 # Subtitle Generator
 
-Generate high-quality `.srt` subtitle files from any video using OpenAI's Whisper transcription API.
+Generate `.srt` and `.fcpxml` subtitle files from any video using local WhisperX transcription with word-level timestamps.
 
-**What makes this different:** Vocabulary hints let you feed names, brands, and technical terms to the transcription engine so it spells them correctly. Without this, AI transcription often mangles proper nouns — this tool fixes that.
+**Key features:**
+- **Runs locally** — no audio is uploaded anywhere. WhisperX transcribes on your machine.
+- **Word-level timestamps** — WhisperX uses forced alignment for precise timing, not just segment-level guesses.
+- **AI punctuation** — an optional OpenAI API key lets GPT-4o-mini add natural punctuation and sentence splitting.
+- **FCPXML export** — import subtitles directly into Final Cut Pro with styled backgrounds (Tap5a Motion template, auto-installed).
+- **Vocabulary hints** — feed names, brands, and technical terms so Whisper spells them correctly.
 
 ---
 
 ## Requirements
 
-- macOS or Windows
-- Python 3.8+
+- macOS (Apple Silicon or Intel)
+- Python 3.10+
 - ffmpeg
-- An OpenAI API key
 
 ---
 
@@ -19,22 +23,12 @@ Generate high-quality `.srt` subtitle files from any video using OpenAI's Whispe
 
 ### 1. Install ffmpeg
 
-**macOS**
 ```bash
 brew install ffmpeg
 ```
 
-**Windows**
-1. Download ffmpeg from [ffmpeg.org/download.html](https://ffmpeg.org/download.html)
-2. Extract the zip and move the folder to `C:\ffmpeg`
-3. Add `C:\ffmpeg\bin` to your system PATH:
-   - Search "Environment Variables" in the Start menu
-   - Under System Variables, select `Path` → Edit → New → add `C:\ffmpeg\bin`
-4. Restart your terminal and verify with `ffmpeg -version`
+### 2. Clone and install
 
-### 2. Clone the repo and install dependencies
-
-**macOS**
 ```bash
 git clone https://github.com/heenamkung/subtitle-generator.git
 cd subtitle-generator
@@ -43,52 +37,80 @@ source .venv/bin/activate
 pip install -r requirements.txt
 ```
 
-**Windows**
-```bash
-git clone https://github.com/heenamkung/subtitle-generator.git
-cd subtitle-generator
-python -m venv .venv
-.venv\Scripts\activate
-pip install -r requirements.txt
-```
-
-### 3. Launch the app
+### 3. Launch
 
 ```bash
 python app.py
 ```
 
-The app will open automatically in your browser.
+The app opens automatically in your browser.
+
+On first run:
+- The Tap5a Motion template is auto-installed to `~/Movies/Motion Templates.localized/` for FCP compatibility.
+- The selected WhisperX model is downloaded once and cached at `~/.cache/huggingface/`.
 
 ---
 
 ## Usage
 
-1. Enter your OpenAI API key
-2. Upload your video file
-3. Add **vocabulary hints** — names, brands, technical terms that you want transcribed correctly (e.g. `Hakui Koyori, Nendoroid, Vox Akuma`)
+1. Upload your video file
+2. Select a Whisper model (`large-v2` for best accuracy, `medium` for faster)
+3. Add **vocabulary hints** — names, brands, anime characters, etc.
 4. Click **Generate Subtitles**
-5. Download the `.srt` file when done
+5. Download the `.srt` and/or `.fcpxml` file
+
+### FCPXML in Final Cut Pro
+
+1. Download the `.fcpxml` file
+2. In FCP: **File > Import > XML**
+3. Subtitles appear as styled title clips on the timeline
+
+### OpenAI API Key (optional)
+
+The API key enables AI-powered punctuation via GPT-4o-mini. Without it, basic rule-based splitting is used instead.
+
+- Enter the key once in the accordion — it auto-saves to `.env` for next time.
+- Costs are minimal (GPT-4o-mini processes text only, not audio).
+- Get a key at [platform.openai.com/api-keys](https://platform.openai.com/api-keys)
 
 ---
 
-## API Key & Costs
-
-This tool uses your own OpenAI API key. You are responsible for any charges incurred on your OpenAI account.
-
-- Transcription is billed per minute of audio. Check [OpenAI's pricing page](https://openai.com/pricing) for current rates.
-- A one-hour video will use approximately 60 minutes of audio transcription.
-- Your API key is never stored — it's only used for the current session and sent directly to OpenAI.
-- Set usage limits on your OpenAI account at [platform.openai.com/account/limits](https://platform.openai.com/account/limits) to avoid unexpected charges.
-
----
-
-## CLI usage
-
-If you prefer the command line:
+## CLI
 
 ```bash
+# WhisperX (default, local)
 python main.py /path/to/video.mp4
+
+# Specify model
+python main.py /path/to/video.mp4 --whisperx-model medium
+
+# With vocabulary hints
+python main.py /path/to/video.mp4 --prompt "Lala, Rito, Haruna"
+
+# OpenAI Whisper API (requires API key in .env)
+python main.py /path/to/video.mp4 --engine openai
 ```
 
 Run `python main.py --help` for all options.
+
+---
+
+## Project Structure
+
+```
+app.py                          # Gradio web UI
+main.py                         # CLI entry point
+config.py                       # Settings (env vars, defaults)
+models.py                       # TranscriptSegment, WordTiming
+agents/subtitle_agent.py        # AI punctuation + subtitle formatting
+skills/
+  audio.py                      # ffmpeg audio extraction
+  transcription_whisperx.py     # WhisperX local transcription
+  transcription.py              # OpenAI Whisper API (fallback)
+  fcpxml.py                     # SRT -> FCPXML converter
+  files.py                      # File I/O utilities
+templates/
+  Tap5a Multiline Text Backgr. 2.moti   # FCP Motion template
+utils/
+  timecode.py                   # Timestamp formatting
+```
