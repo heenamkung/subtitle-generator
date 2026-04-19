@@ -3,6 +3,8 @@ from __future__ import annotations
 import os
 import shutil
 import tempfile
+import threading
+import time
 from pathlib import Path
 
 import gradio as gr
@@ -163,7 +165,12 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
         work_dir = Path(tempfile.mkdtemp())
 
         try:
-            from skills.transcription_whisperx import WhisperXTranscriptionSkill  # lazy: heavy deps
+            # Lazy imports: heavy ML deps — don't load at module import time.
+            from skills.transcription_whisperx import (
+                WhisperXTranscriptionSkill,
+                _MODEL_SIZES_MB,
+                _dir_size_mb,
+            )
 
             audio_dir = work_dir / "audio"
             audio_dir.mkdir()
@@ -186,17 +193,15 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
                 channels=1,
             )
 
-            _cache = Path.home() / ".cache" / "huggingface" / "hub" / f"models--Systran--faster-whisper-{whisperx_model_name}"
-            if _cache.exists() and not any(_cache.rglob("*.incomplete")):
-                msg = "Loading WhisperX model from cache..."
-            else:
-                msg = f"Downloading WhisperX model '{whisperx_model_name}' (this only happens once)..."
-
-            yield (
-                gr.update(value=_status_html(msg), visible=True),
-                gr.update(),
-                gr.update(),
+            # ----------------------------------------------------------
+            # Model load (may download ~3 GB on first run)
+            # ----------------------------------------------------------
+            cache_dir = (
+                Path.home() / ".cache" / "huggingface" / "hub"
+                / f"models--Systran--faster-whisper-{whisperx_model_name}"
             )
+            has_cache = cache_dir.exists() and not any(cache_dir.rglob("*.incomplete"))
+            expected_mb = _MODEL_SIZES_MB.get(whisperx_model_name, 1500)
 
             skill = WhisperXTranscriptionSkill(
                 model_name=whisperx_model_name,
@@ -205,13 +210,82 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
                 initial_prompt=prompt or "",
             )
 
-            yield (
-                gr.update(value=_status_html("Detecting speech and transcribing..."), visible=True),
-                gr.update(),
-                gr.update(),
-            )
+            # Run the blocking load on a thread so the generator can keep
+            # yielding UI updates while the download / load happens.
+            load_err: dict = {}
 
-            segments = skill.transcribe(audio_path=source_audio)
+            def _load() -> None:
+                try:
+                    skill._ensure_model()
+                except Exception as exc:
+                    load_err["e"] = exc
+
+            load_thread = threading.Thread(target=_load, daemon=True)
+            load_thread.start()
+
+            while load_thread.is_alive():
+                load_thread.join(timeout=2.0)
+                if not load_thread.is_alive():
+                    break
+                if has_cache:
+                    msg = "Loading WhisperX model from cache..."
+                else:
+                    mb = _dir_size_mb(cache_dir)
+                    pct = min(99, int((mb / expected_mb) * 100))
+                    msg = (
+                        f"Downloading WhisperX model '{whisperx_model_name}' — "
+                        f"{mb:.0f} / ~{expected_mb} MB ({pct}%). One-time download."
+                    )
+                yield (
+                    gr.update(value=_status_html(msg), visible=True),
+                    gr.update(),
+                    gr.update(),
+                )
+
+            if "e" in load_err:
+                raise gr.Error(f"Failed to load model: {load_err['e']}")
+
+            # ----------------------------------------------------------
+            # Transcription + forced alignment (1-3 min on CPU, typically)
+            # ----------------------------------------------------------
+            # We can't get true % progress without patching WhisperX, but
+            # showing elapsed time reassures the user nothing is stuck.
+            transcribe_result: dict = {}
+            transcribe_err: dict = {}
+
+            def _transcribe() -> None:
+                try:
+                    transcribe_result["segments"] = skill.transcribe(audio_path=source_audio)
+                except Exception as exc:
+                    transcribe_err["e"] = exc
+
+            tr_start = time.monotonic()
+            tr_thread = threading.Thread(target=_transcribe, daemon=True)
+            tr_thread.start()
+
+            while tr_thread.is_alive():
+                tr_thread.join(timeout=2.0)
+                if not tr_thread.is_alive():
+                    break
+                elapsed = int(time.monotonic() - tr_start)
+                mins, secs = divmod(elapsed, 60)
+                time_str = f"{mins}m {secs:02d}s" if mins else f"{secs}s"
+                yield (
+                    gr.update(
+                        value=_status_html(
+                            f"Transcribing audio and aligning word timestamps... "
+                            f"({time_str} elapsed)"
+                        ),
+                        visible=True,
+                    ),
+                    gr.update(),
+                    gr.update(),
+                )
+
+            if "e" in transcribe_err:
+                raise gr.Error(str(transcribe_err["e"]))
+
+            segments = transcribe_result["segments"]
 
             if not segments:
                 raise gr.Error("No transcript segments were produced. Check your video has audio.")

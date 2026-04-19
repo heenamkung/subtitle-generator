@@ -13,17 +13,18 @@ Generate `.srt` and `.fcpxml` subtitle files from any video using local WhisperX
 
 ## Requirements
 
-- macOS (Apple Silicon or Intel)
-- Python 3.10+
-- ffmpeg
+- macOS, Windows, or Linux
+- Docker Desktop (recommended) **or** Python 3.10+ and ffmpeg (native setup)
 
 ---
 
 ## Setup
 
-### Option A — Docker (recommended)
+### Option A — Docker (recommended, works on macOS / Windows / Linux)
 
 The easiest way. No Python, no ffmpeg, no dependency conflicts.
+
+**macOS / Linux:**
 
 ```bash
 git clone https://github.com/heenamkung/subtitle-generator.git
@@ -32,16 +33,30 @@ touch .env           # so compose can mount it for API-key persistence
 docker compose up --build
 ```
 
+**Windows (PowerShell):**
+
+```powershell
+git clone https://github.com/heenamkung/subtitle-generator.git
+cd subtitle-generator
+New-Item -ItemType File -Path .env -Force | Out-Null   # create empty .env
+New-Item -ItemType Directory -Path output -Force | Out-Null
+docker compose up --build
+```
+
+> Windows note: the `.env` file and `output/` directory must exist **before**
+> `docker compose up`. If they don't, Docker Desktop silently creates them as
+> directories instead of files, which breaks the bind-mount.
+
 Then open http://localhost:7860 in your browser.
 
 > **First run takes ~10 minutes** — Docker downloads and installs PyTorch,
 > WhisperX, FFmpeg, and the Python runtime. This is a one-time cost.
 > The first time you transcribe, WhisperX also downloads the ~3GB `large-v2`
 > model. Both the image and the model are cached, so every subsequent run
-> starts in seconds.
+> starts in seconds. Download progress shows in the web UI.
 
-**Note for Final Cut Pro users:** the container can't install the Motion
-template to your Mac's `~/Movies/` folder. Copy it manually once:
+**Note for Final Cut Pro users (macOS only):** the container can't install the
+Motion template to your Mac's `~/Movies/` folder. Copy it manually once:
 
 ```bash
 mkdir -p "$HOME/Movies/Motion Templates.localized/Titles.localized/Tap5a"
