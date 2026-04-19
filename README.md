@@ -15,6 +15,25 @@ Generate `.srt` and `.fcpxml` subtitle files from any video using local WhisperX
 
 - macOS, Windows, or Linux
 - Docker Desktop (recommended) **or** Python 3.10+ and ffmpeg (native setup)
+- **Memory:** ~8 GB allocated to Docker Desktop for the default `large-v2` model.
+  Lower-RAM machines should pick a smaller model in the UI — see the table below.
+
+### Model size vs RAM
+
+RAM usage is driven by the Whisper model, **not** the length of your video.
+A 5-hour video needs roughly the same memory as a 5-minute one.
+
+| Model      | Peak RAM | Accuracy | Speed       |
+|------------|----------|----------|-------------|
+| `large-v2` | ~6-7 GB  | Best     | Slowest     |
+| `medium`   | ~3-4 GB  | Great    | Balanced    |
+| `small`    | ~2 GB    | Good     | Faster      |
+| `base`     | ~1 GB    | OK       | Fast        |
+| `tiny`     | ~500 MB  | Rough    | Fastest     |
+
+**If the container crashes mid-transcription**, it's almost certainly hitting
+the Docker memory ceiling. Either bump Docker Desktop → Settings → Resources →
+Memory to 8-12 GB, or pick a smaller model from the dropdown.
 
 ---
 
