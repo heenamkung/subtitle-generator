@@ -1,10 +1,15 @@
 from __future__ import annotations
 
+import os
 import shutil
 import tempfile
 from pathlib import Path
 
 import gradio as gr
+
+# When running in Docker we skip the macOS-only Motion template install and
+# let Gradio bind to 0.0.0.0 via env vars (set in the Dockerfile).
+_IN_DOCKER = os.getenv("IN_DOCKER") == "1"
 
 from agents.subtitle_agent import SubtitleAgent
 from skills.audio import AudioSkill
@@ -24,6 +29,11 @@ _TEMPLATE_DST = (
 
 def _install_motion_template() -> None:
     """Copy the bundled Motion template to FCP's template folder if not already there."""
+    if _IN_DOCKER:
+        # Containers can't write to the host's ~/Movies. The user must copy
+        # templates/Tap5a Multiline Text Backgr. 2.moti manually on the Mac host.
+        print("  Skipping Motion template install (running in Docker).")
+        return
     if _TEMPLATE_DST.exists():
         return
     _TEMPLATE_DST.parent.mkdir(parents=True, exist_ok=True)
@@ -92,7 +102,8 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
         gr.Markdown(
             "Generate `.srt` and `.fcpxml` subtitle files from any video using WhisperX.\n\n"
             "Transcription runs **locally** — no audio is uploaded. "
-            "An optional OpenAI API key enables AI-powered punctuation and natural sentence splitting."
+            "An optional OpenAI API key enables AI-powered punctuation and natural sentence splitting. "
+            "Only the text transcript is sent to OpenAI — never your audio or video."
         )
 
         video_input = gr.File(
@@ -111,30 +122,38 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
             info="Helps Whisper correctly spell proper nouns and uncommon words. Separate with commas.",
         )
 
-        with gr.Accordion("OpenAI API Key (for subtitle formatting)", open=False):
-            gr.Markdown(
-                "The API key is used by GPT-4o-mini to add punctuation and split subtitles into "
-                "natural sentences. Without it, basic splitting is used instead."
-            )
-            api_key = gr.Textbox(
-                label="API Key",
-                placeholder="sk-...",
-                type="password",
-                value=_load_saved_key(),
-                info="Don't have one? Get it at platform.openai.com/api-keys",
-            )
+        gr.Markdown(
+            "### OpenAI API Key (highly recommended)\n"
+            "Adding an API key **dramatically improves subtitle quality** — GPT-4o-mini adds "
+            "natural punctuation, sentence breaks, and commas for far more readable subtitles. "
+            "Without it, you'll get basic splitting that may feel rough."
+        )
+        api_key = gr.Textbox(
+            label="API Key",
+            placeholder="sk-...",
+            type="password",
+            value=_load_saved_key(),
+            info="Don't have one? Get it at platform.openai.com/api-keys",
+        )
 
-        generate_btn = gr.Button("Generate Subtitles", variant="primary")
+        generate_btn = gr.Button("Generate Subtitles", variant="primary", visible=False)
         gen_status = gr.HTML(visible=False)
         with gr.Row():
-            srt_output = gr.File(label="Download SRT", interactive=False, elem_classes="download-btn")
-            fcpxml_gen_output = gr.File(label="Download FCPXML", interactive=False, elem_classes="download-btn")
+            srt_output = gr.File(label="Download SRT", interactive=False, elem_classes="download-btn", visible=False)
+            fcpxml_gen_output = gr.File(label="Download FCPXML", interactive=False, elem_classes="download-btn", visible=False)
 
     # ------------------------------------------------------------------
     # Handlers
     # ------------------------------------------------------------------
     # Auto-save the key whenever the user changes it (no separate Save button needed)
     api_key.change(fn=_save_key, inputs=[api_key], outputs=[])
+
+    # Only show the Generate button once a video file has been uploaded.
+    video_input.change(
+        fn=lambda f: gr.update(visible=f is not None),
+        inputs=[video_input],
+        outputs=[generate_btn],
+    )
 
     def run_generate(video_file, whisperx_model_name, prompt, openai_key):
         if not video_file:
@@ -155,8 +174,8 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
 
             yield (
                 gr.update(value=_status_html("Extracting audio..."), visible=True),
-                gr.update(),
-                gr.update(),
+                gr.update(value=None, visible=False),
+                gr.update(value=None, visible=False),
             )
 
             source_audio = audio_skill.extract_audio(
@@ -238,8 +257,8 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
 
             yield (
                 gr.update(value="", visible=False),
-                gr.update(value=str(stable_srt)),
-                gr.update(value=str(stable_fcpxml)),
+                gr.update(value=str(stable_srt), visible=True),
+                gr.update(value=str(stable_fcpxml), visible=True),
             )
 
         except gr.Error:
@@ -258,4 +277,6 @@ with gr.Blocks(title="Subtitle Generator", css=css) as demo:
 
 
 if __name__ == "__main__":
-    demo.launch(inbrowser=True)
+    # In Docker there's no browser to open, and GRADIO_SERVER_NAME is already
+    # set to 0.0.0.0 via the Dockerfile env. On the Mac host, open a browser tab.
+    demo.launch(inbrowser=not _IN_DOCKER)

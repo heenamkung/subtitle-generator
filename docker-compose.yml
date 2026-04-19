@@ -1,0 +1,19 @@
+services:
+  subtitle-generator:
+    build: .
+    image: subtitle-generator:latest
+    container_name: subtitle-generator
+    ports:
+      - "7860:7860"
+    volumes:
+      # Persist the WhisperX model cache across container rebuilds.
+      # First launch downloads ~3GB for large-v2; after that it's instant.
+      - hf-cache:/root/.cache/huggingface
+      # Persist the OpenAI API key the user types in the UI (auto-saved to .env).
+      - ./.env:/app/.env
+      # Optional: expose generated SRT/FCPXML files on the host.
+      - ./output:/app/output
+    restart: unless-stopped
+
+volumes:
+  hf-cache:
